@@ -76,13 +76,13 @@ static void stepper_task(void *pvParameters) {
 
         // Log every 256 steps
         if (abs(stepper.currentPos - last_logged_pos) >= 256) {
-            ESP_LOGI(TAG, "Position: %d", stepper.currentPos);
+            ESP_LOGD(TAG, "Position: %d", stepper.currentPos);
             last_logged_pos = stepper.currentPos;
         }
 
         if (distance_to_go == 0) {
             stepper.targetPos = -stepper.currentPos;
-            ESP_LOGI(TAG, "Changing direction");
+            ESP_LOGD(TAG, "Changing direction");
             vTaskDelay(1);
             continue;
         }
@@ -114,6 +114,11 @@ static void stepper_task(void *pvParameters) {
 void app_main(void) {
     init_gpio();
     
+    // set logging levels in the menuconfig under "Component config → Log output → Default log verbosity"
+    #if CONFIG_LOG_DEFAULT_LEVEL > ESP_LOG_INFO
+        esp_log_level_set(TAG, ESP_LOG_INFO);    // Only show INFO and above
+    #endif
+
     // Create task pinned to core 1
     xTaskCreatePinnedToCore(
         stepper_task,
