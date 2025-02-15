@@ -10,6 +10,7 @@
 #define IN2 5
 #define IN3 6
 #define IN4 7
+#define LIMIT_SWITCH_PIN 15
 
 #define STEPS_PER_REVOLUTION 2048
 
@@ -54,61 +55,92 @@ static void set_output_pins(uint8_t step_index) {
 }
 
 static void init_gpio(void) {
-    gpio_config_t io_conf = {
+    // Configure stepper motor pins
+    gpio_config_t motor_conf = {
         .intr_type = GPIO_INTR_DISABLE,
         .mode = GPIO_MODE_OUTPUT,
         .pin_bit_mask = (1ULL << IN1) | (1ULL << IN2) | (1ULL << IN3) | (1ULL << IN4),
         .pull_down_en = 0,
         .pull_up_en = 0
     };
-    gpio_config(&io_conf);
+    gpio_config(&motor_conf);
+
+    // Configure limit switch pin with pull-up
+    gpio_config_t switch_conf = {
+        .intr_type = GPIO_INTR_DISABLE,  // No interrupts
+        .mode = GPIO_MODE_INPUT,
+        .pin_bit_mask = (1ULL << LIMIT_SWITCH_PIN),
+        .pull_down_en = 0,
+        .pull_up_en = 1  // Enable internal pull-up
+    };
+    gpio_config(&switch_conf);
 }
 
 static void stepper_task(void *pvParameters) {
-    int64_t current_time;
-    int32_t distance_to_go;
-    int last_logged_pos = 0;
-    int steps_since_yield = 0;
+   int64_t current_time;
+   int32_t distance_to_go;
+   int last_logged_pos = 0;
+   int steps_since_yield = 0;
+   int last_switch_state = 1;
+   int rotation_direction = 1;
+   int64_t last_trigger_time = 0;
+   const int64_t DEBOUNCE_TIME_US = 200000;  // 200ms debounce
 
-    while (1) {
-        current_time = esp_timer_get_time();
-        distance_to_go = stepper.targetPos - stepper.currentPos;
+   // Set initial direction of continuous rotation
+   stepper.targetPos = INT32_MAX * rotation_direction;
 
-        // Log every 256 steps
-        if (abs(stepper.currentPos - last_logged_pos) >= 256) {
-            ESP_LOGD(TAG, "Position: %d", stepper.currentPos);
-            last_logged_pos = stepper.currentPos;
-        }
+   while (1) {
+       current_time = esp_timer_get_time();
+       distance_to_go = stepper.targetPos - stepper.currentPos;
 
-        if (distance_to_go == 0) {
-            stepper.targetPos = -stepper.currentPos;
-            ESP_LOGD(TAG, "Changing direction");
-            vTaskDelay(1);
-            continue;
-        }
+       // Check if we need to update target position to keep moving
+       if (abs(distance_to_go) < STEPS_PER_REVOLUTION) {
+           stepper.targetPos = rotation_direction * INT32_MAX;
+       }
 
-        // Check if 2000 microseconds (2ms) have passed
-        if ((current_time - stepper.lastStepTime) >= 2000) {  // Slower step rate
-            // Move one step
-            if (distance_to_go > 0) {
-                stepper.currentPos++;
-                stepper.currentStep = (stepper.currentStep + 1) % 8;
-            } else {
-                stepper.currentPos--;
-                stepper.currentStep = (stepper.currentStep + 7) % 8;
-            }
+       // Check for falling edge on limit switch with debounce
+       int current_switch_state = gpio_get_level(LIMIT_SWITCH_PIN);
+       if (current_switch_state == 0 && last_switch_state == 1) {
+           if ((current_time - last_trigger_time) > DEBOUNCE_TIME_US) {
+               ESP_LOGI(TAG, "Limit switch triggered - setting zero position");
+               stepper.currentPos = 0;
+               rotation_direction = -rotation_direction;  // Reverse direction
+               stepper.targetPos = rotation_direction * INT32_MAX;
+               last_trigger_time = current_time;
+               
+               vTaskDelay(pdMS_TO_TICKS(50));
+           }
+       }
+       last_switch_state = current_switch_state;
 
-            set_output_pins(stepper.currentStep);
-            stepper.lastStepTime = current_time;
-            
-            // Yield every 32 steps
-            steps_since_yield++;
-            if (steps_since_yield >= 32) {
-                vTaskDelay(1);
-                steps_since_yield = 0;
-            }
-        }
-    }
+       // Log every 256 steps
+       if (abs(stepper.currentPos - last_logged_pos) >= 256) {
+           ESP_LOGD(TAG, "Position: %d", stepper.currentPos);
+           last_logged_pos = stepper.currentPos;
+       }
+
+       // Check if 2000 microseconds (2ms) have passed
+       if ((current_time - stepper.lastStepTime) >= 2000) {
+           // Move one step
+           if (distance_to_go > 0) {
+               stepper.currentPos++;
+               stepper.currentStep = (stepper.currentStep + 1) % 8;
+           } else {
+               stepper.currentPos--;
+               stepper.currentStep = (stepper.currentStep + 7) % 8;
+           }
+
+           set_output_pins(stepper.currentStep);
+           stepper.lastStepTime = current_time;
+           
+           // Yield every 32 steps
+           steps_since_yield++;
+           if (steps_since_yield >= 32) {
+               vTaskDelay(1);
+               steps_since_yield = 0;
+           }
+       }
+   }
 }
 
 void app_main(void) {
