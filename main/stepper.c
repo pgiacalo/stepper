@@ -16,12 +16,16 @@
 #include "esp_timer.h"
 
 // GPIO pin definitions for motor control and limit switches
-#define IN1 4
-#define IN2 5
-#define IN3 6
-#define IN4 7
-#define LIMIT_SWITCH_PIN_1 15
-#define LIMIT_SWITCH_PIN_2 16 
+#define IN1_MOTOR1 4
+#define IN2_MOTOR1 5
+#define IN3_MOTOR1 6
+#define IN4_MOTOR1 7
+#define IN1_MOTOR2 8   // New pins for second motor
+#define IN2_MOTOR2 9
+#define IN3_MOTOR2 10
+#define IN4_MOTOR2 11
+#define LIMIT_SWITCH_MOTOR1 15
+#define LIMIT_SWITCH_MOTOR2 16
 
 // Motor control parameters
 #define STEPS_PER_REVOLUTION 4096
@@ -84,7 +88,19 @@ typedef struct {
     motor_callbacks_t *callbacks;
 } motor_handle_t;
 
-static stepper_state_t stepper = {
+static stepper_state_t stepper1 = {
+    .currentPos = 0,
+    .targetPos = INT32_MAX,
+    .currentStep = 0,
+    .lastStepTime = 0,
+    .current_freq = START_FREQ,
+    .target_freq = MAX_FREQ,
+    .last_freq_update = 0,
+    .ramping_up = true,
+    .direction_changed = false
+};
+
+static stepper_state_t stepper2 = {
     .currentPos = 0,
     .targetPos = INT32_MAX,
     .currentStep = 0,
@@ -97,8 +113,10 @@ static stepper_state_t stepper = {
 };
 
 // Add these as static globals at the top of the file with other static variables
-static motor_callbacks_t callbacks;
-static motor_handle_t handle;
+static motor_callbacks_t callbacks1;
+static motor_callbacks_t callbacks2;
+static motor_handle_t handle1;
+static motor_handle_t handle2;
 
 // Forward declarations
 static void handle_limit_switch_trigger(motor_handle_t *handle, int *rotation_direction, int64_t current_time);
@@ -139,11 +157,18 @@ static void update_frequency(int64_t current_time, stepper_state_t *stepper) {
  * 
  * @param step_index: Index into the step_sequence array (0-7)
  */
-static void set_output_pins(uint8_t step_index) {
-    gpio_set_level(IN1, step_sequence[step_index][0]);
-    gpio_set_level(IN2, step_sequence[step_index][1]);
-    gpio_set_level(IN3, step_sequence[step_index][2]);
-    gpio_set_level(IN4, step_sequence[step_index][3]);
+static void set_output_pins(uint8_t step_index, bool is_motor1) {
+    if (is_motor1) {
+        gpio_set_level(IN1_MOTOR1, step_sequence[step_index][0]);
+        gpio_set_level(IN2_MOTOR1, step_sequence[step_index][1]);
+        gpio_set_level(IN3_MOTOR1, step_sequence[step_index][2]);
+        gpio_set_level(IN4_MOTOR1, step_sequence[step_index][3]);
+    } else {
+        gpio_set_level(IN1_MOTOR2, step_sequence[step_index][0]);
+        gpio_set_level(IN2_MOTOR2, step_sequence[step_index][1]);
+        gpio_set_level(IN3_MOTOR2, step_sequence[step_index][2]);
+        gpio_set_level(IN4_MOTOR2, step_sequence[step_index][3]);
+    }
 }
 
 /*
@@ -151,19 +176,30 @@ static void set_output_pins(uint8_t step_index) {
  * Configures motor pins as outputs and limit switch pins as inputs with pull-up
  */
 static void init_gpio(void) {
-    gpio_config_t motor_conf = {
+    gpio_config_t motor1_conf = {
         .intr_type = GPIO_INTR_DISABLE,
         .mode = GPIO_MODE_OUTPUT,
-        .pin_bit_mask = (1ULL << IN1) | (1ULL << IN2) | (1ULL << IN3) | (1ULL << IN4),
+        .pin_bit_mask = (1ULL << IN1_MOTOR1) | (1ULL << IN2_MOTOR1) | 
+                       (1ULL << IN3_MOTOR1) | (1ULL << IN4_MOTOR1),
         .pull_down_en = 0,
         .pull_up_en = 0
     };
-    gpio_config(&motor_conf);
+    gpio_config(&motor1_conf);
+
+    gpio_config_t motor2_conf = {
+        .intr_type = GPIO_INTR_DISABLE,
+        .mode = GPIO_MODE_OUTPUT,
+        .pin_bit_mask = (1ULL << IN1_MOTOR2) | (1ULL << IN2_MOTOR2) | 
+                       (1ULL << IN3_MOTOR2) | (1ULL << IN4_MOTOR2),
+        .pull_down_en = 0,
+        .pull_up_en = 0
+    };
+    gpio_config(&motor2_conf);
 
     gpio_config_t switch_conf = {
         .intr_type = GPIO_INTR_DISABLE,
         .mode = GPIO_MODE_INPUT,
-        .pin_bit_mask = (1ULL << LIMIT_SWITCH_PIN_1) | (1ULL << LIMIT_SWITCH_PIN_2),
+        .pin_bit_mask = (1ULL << LIMIT_SWITCH_MOTOR1) | (1ULL << LIMIT_SWITCH_MOTOR2),
         .pull_down_en = 0,
         .pull_up_en = 1
     };
@@ -253,7 +289,7 @@ static void stepper_task(void *pvParameters) {
                 handle->stepper->currentStep = (handle->stepper->currentStep + 7) % 8;
             }
 
-            set_output_pins(handle->stepper->currentStep);
+            set_output_pins(handle->stepper->currentStep, handle->motor_id == 1);
             handle->stepper->lastStepTime = current_time;
             
             // Yield periodically
@@ -271,49 +307,73 @@ static void stepper_task(void *pvParameters) {
  * Initializes the GPIO and creates the stepper motor control task
  */
 void app_main(void) {
-    motor_config_t config = {
+    motor_config_t config1 = {
         .steps_per_rev = 4096,
-        .gpio_limit1 = LIMIT_SWITCH_PIN_1,
-        .gpio_limit2 = LIMIT_SWITCH_PIN_2
+        .gpio_limit1 = LIMIT_SWITCH_MOTOR1,
+        .gpio_limit2 = 0  // Not used
+    };
+
+    motor_config_t config2 = {
+        .steps_per_rev = 4096,
+        .gpio_limit1 = LIMIT_SWITCH_MOTOR2,
+        .gpio_limit2 = 0  // Not used
     };
 
     init_gpio();
     
-    // Initialize the static callbacks structure
-    callbacks.limit_switch_callback = NULL;
-    callbacks.position_callback = NULL;
+    // Initialize callbacks
+    callbacks1.limit_switch_callback = NULL;
+    callbacks1.position_callback = NULL;
+    callbacks2.limit_switch_callback = NULL;
+    callbacks2.position_callback = NULL;
 
-    // Initialize the static handle structure
-    handle.motor_id = 0;
-    handle.stepper = &stepper;
-    handle.steps_per_rev = config.steps_per_rev;
-    handle.gpio_limit1 = config.gpio_limit1;
-    handle.gpio_limit2 = config.gpio_limit2;
-    handle.callbacks = &callbacks;
+    // Initialize handles
+    handle1.motor_id = 1;
+    handle1.stepper = &stepper1;
+    handle1.steps_per_rev = config1.steps_per_rev;
+    handle1.gpio_limit1 = config1.gpio_limit1;
+    handle1.gpio_limit2 = 0;
+    handle1.callbacks = &callbacks1;
+
+    handle2.motor_id = 2;
+    handle2.stepper = &stepper2;
+    handle2.steps_per_rev = config2.steps_per_rev;
+    handle2.gpio_limit1 = config2.gpio_limit1;
+    handle2.gpio_limit2 = 0;
+    handle2.callbacks = &callbacks2;
+
+    // Create tasks for both motors on different cores
+    xTaskCreatePinnedToCore(
+        stepper_task,
+        "stepper1_task",
+        4096,
+        &handle1,
+        5,  // Lower priority than the other task
+        NULL,
+        0   // Run on core 0
+    );
 
     xTaskCreatePinnedToCore(
         stepper_task,
-        "stepper_task",
+        "stepper2_task",
         4096,
-        &handle,  // Now passing address of static handle
-        configMAX_PRIORITIES - 1,
+        &handle2,
+        configMAX_PRIORITIES - 1,  // Higher priority
         NULL,
-        1
+        1   // Run on core 1
     );
     
-    ESP_LOGI(TAG, "Stepper motor control started");
+    ESP_LOGI(TAG, "Dual stepper motor control started");
 }
 
 static void handle_limit_switch_trigger(motor_handle_t *handle, int *rotation_direction, int64_t current_time) {
-    (void)current_time;  // Add this to indicate parameter is intentionally unused
+    (void)current_time;
     
-    ESP_LOGI(TAG, "Limit switch triggered - reversing direction");
+    ESP_LOGI(TAG, "Limit switch triggered - reversing direction for motor %d", handle->motor_id);
     handle->stepper->currentPos = 0;
     *rotation_direction = -(*rotation_direction);
     handle->stepper->targetPos = *rotation_direction * INT32_MAX;
     handle->stepper->direction_changed = true;  // Signal for frequency reset
-    
-    vTaskDelay(pdMS_TO_TICKS(50));
     
     if (handle->callbacks && handle->callbacks->limit_switch_callback) {
         handle->callbacks->limit_switch_callback(handle->motor_id);
