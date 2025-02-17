@@ -31,16 +31,16 @@
 #include "esp_timer.h"
 
 // GPIO pin definitions for both motors and their limit switches
-#define IN1_MOTOR1 4    // Motor 1 control pins
-#define IN2_MOTOR1 5
-#define IN3_MOTOR1 6
-#define IN4_MOTOR1 7
-#define IN1_MOTOR2 8    // Motor 2 control pins
-#define IN2_MOTOR2 9
-#define IN3_MOTOR2 10
-#define IN4_MOTOR2 11
-#define LIMIT_SWITCH_MOTOR1 15  // Limit switch for motor 1
-#define LIMIT_SWITCH_MOTOR2 16  // Limit switch for motor 2
+#define IN1_MOTOR1 GPIO_NUM_4    // Motor 1 control pins
+#define IN2_MOTOR1 GPIO_NUM_5
+#define IN3_MOTOR1 GPIO_NUM_6
+#define IN4_MOTOR1 GPIO_NUM_7
+#define IN1_MOTOR2 GPIO_NUM_8    // Motor 2 control pins
+#define IN2_MOTOR2 GPIO_NUM_9
+#define IN3_MOTOR2 GPIO_NUM_10
+#define IN4_MOTOR2 GPIO_NUM_11
+#define LIMIT_SWITCH_MOTOR1 GPIO_NUM_15  // Limit switch for motor 1
+#define LIMIT_SWITCH_MOTOR2 GPIO_NUM_16  // Limit switch for motor 2
 
 // Motor control parameters
 #define STEPS_PER_REVOLUTION 4096
