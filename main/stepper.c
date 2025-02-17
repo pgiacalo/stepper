@@ -51,7 +51,7 @@ static stepper_state_t stepper = {
     .current_freq = START_FREQ,
     .target_freq = MAX_FREQ,
     .last_freq_update = 0,
-    .ramping_up = false,
+    .ramping_up = true,
     .direction_changed = false
 };
 
@@ -119,6 +119,7 @@ static void stepper_task(void *pvParameters) {
     const int64_t DEBOUNCE_TIME_US = 200000;  // 200ms debounce
 
     stepper.targetPos = INT32_MAX * rotation_direction;
+    stepper.last_freq_update = esp_timer_get_time();
 
     while (1) {
         current_time = esp_timer_get_time();
