@@ -63,6 +63,27 @@ typedef struct {
     bool direction_changed;   // Flag for direction changes
 } stepper_state_t;
 
+typedef struct {
+    uint32_t steps_per_rev;
+    int gpio_limit1;
+    int gpio_limit2;
+} motor_config_t;
+
+typedef struct {
+    void (*limit_switch_callback)(int motor_id);
+    void (*position_callback)(int32_t position);
+    // other callback functions
+} motor_callbacks_t;
+
+typedef struct {
+    int motor_id;
+    stepper_state_t *stepper;
+    uint32_t steps_per_rev;
+    int gpio_limit1;
+    int gpio_limit2;
+    motor_callbacks_t *callbacks;
+} motor_handle_t;
+
 static stepper_state_t stepper = {
     .currentPos = 0,
     .targetPos = INT32_MAX,
@@ -75,35 +96,42 @@ static stepper_state_t stepper = {
     .direction_changed = false
 };
 
+// Add these as static globals at the top of the file with other static variables
+static motor_callbacks_t callbacks;
+static motor_handle_t handle;
+
+// Forward declarations
+static void handle_limit_switch_trigger(motor_handle_t *handle, int *rotation_direction, int64_t current_time);
+
 /*
  * Updates the motor's operating frequency based on acceleration parameters
  * Handles both acceleration ramping and direction changes
  * 
  * @param current_time: Current system time in microseconds
  */
-static void update_frequency(int64_t current_time) {
-    if (!stepper.ramping_up && !stepper.direction_changed) {
+static void update_frequency(int64_t current_time, stepper_state_t *stepper) {
+    if (!stepper->ramping_up && !stepper->direction_changed) {
         return;
     }
 
-    float elapsed_sec = (current_time - stepper.last_freq_update) / 1000000.0f;
+    float elapsed_sec = (current_time - stepper->last_freq_update) / 1000000.0f;
     if (elapsed_sec < 0.001f) { // Update every 1ms
         return;
     }
 
-    if (stepper.direction_changed) {
-        stepper.current_freq = START_FREQ;
-        stepper.direction_changed = false;
-        stepper.ramping_up = true;
-    } else if (stepper.ramping_up) {
-        stepper.current_freq += ACCEL_RATE * elapsed_sec;
-        if (stepper.current_freq >= stepper.target_freq) {
-            stepper.current_freq = stepper.target_freq;
-            stepper.ramping_up = false;
+    if (stepper->direction_changed) {
+        stepper->current_freq = START_FREQ;
+        stepper->direction_changed = false;
+        stepper->ramping_up = true;
+    } else if (stepper->ramping_up) {
+        stepper->current_freq += ACCEL_RATE * elapsed_sec;
+        if (stepper->current_freq >= stepper->target_freq) {
+            stepper->current_freq = stepper->target_freq;
+            stepper->ramping_up = false;
         }
     }
 
-    stepper.last_freq_update = current_time;
+    stepper->last_freq_update = current_time;
 }
 
 /*
@@ -150,74 +178,83 @@ static void init_gpio(void) {
  * @param pvParameters: Task parameters (unused)
  */
 static void stepper_task(void *pvParameters) {
+    (void)pvParameters;  // Add this since we use handle directly from global
+    motor_handle_t *handle = (motor_handle_t*)pvParameters;
     int64_t current_time;
     int32_t distance_to_go;
     int last_logged_pos = 0;
     int steps_since_yield = 0;
-    int last_switch1_state = 1;
-    int last_switch2_state = 1;
     int rotation_direction = 1;
     int64_t last_trigger_time = 0;
+    bool switch1_triggered = false;  // Track if switch1 is currently triggered
+    bool switch2_triggered = false;  // Track if switch2 is currently triggered
     const int64_t DEBOUNCE_TIME_US = 200000;  // 200ms debounce
 
-    stepper.targetPos = INT32_MAX * rotation_direction;
-    stepper.last_freq_update = esp_timer_get_time();
+    handle->stepper->targetPos = INT32_MAX * rotation_direction;
+    handle->stepper->last_freq_update = esp_timer_get_time();
 
     while (1) {
         current_time = esp_timer_get_time();
-        distance_to_go = stepper.targetPos - stepper.currentPos;
+        distance_to_go = handle->stepper->targetPos - handle->stepper->currentPos;
 
         // Update frequency based on ramping
-        update_frequency(current_time);
+        update_frequency(current_time, handle->stepper);
         
         // Calculate step timing based on current frequency
-        uint32_t micros_per_step = (uint32_t)(1000000.0f / stepper.current_freq);
+        uint32_t micros_per_step = (uint32_t)(1000000.0f / handle->stepper->current_freq);
 
-        if (abs(distance_to_go) < STEPS_PER_REVOLUTION) {
-            stepper.targetPos = rotation_direction * INT32_MAX;
+        if (abs(distance_to_go) < handle->steps_per_rev) {
+            handle->stepper->targetPos = rotation_direction * INT32_MAX;
         }
 
         // Check both switches for falling edge with debounce
-        int current_switch1_state = gpio_get_level(LIMIT_SWITCH_PIN_1);
-        int current_switch2_state = gpio_get_level(LIMIT_SWITCH_PIN_2);
+        int current_switch1_state = gpio_get_level(handle->gpio_limit1);
+        int current_switch2_state = gpio_get_level(handle->gpio_limit2);
         
-        if (((current_switch1_state == 0 && last_switch1_state == 1) ||
-             (current_switch2_state == 0 && last_switch2_state == 1)) &&
-            ((current_time - last_trigger_time) > DEBOUNCE_TIME_US)) {
-            
-            ESP_LOGI(TAG, "Limit switch triggered - reversing direction");
-            stepper.currentPos = 0;
-            rotation_direction = -rotation_direction;
-            stepper.targetPos = rotation_direction * INT32_MAX;
-            stepper.direction_changed = true;  // Signal for frequency reset
-            last_trigger_time = current_time;
-            
-            vTaskDelay(pdMS_TO_TICKS(50));
+        if ((current_time - last_trigger_time) > DEBOUNCE_TIME_US) {
+            // Check switch 1
+            if (current_switch1_state == 0 && !switch1_triggered) {
+                switch1_triggered = true;
+                handle_limit_switch_trigger(handle, &rotation_direction, current_time);
+                last_trigger_time = current_time;
+            } else if (current_switch1_state == 1) {
+                switch1_triggered = false;
+            }
+
+            // Check switch 2
+            if (current_switch2_state == 0 && !switch2_triggered) {
+                switch2_triggered = true;
+                handle_limit_switch_trigger(handle, &rotation_direction, current_time);
+                last_trigger_time = current_time;
+            } else if (current_switch2_state == 1) {
+                switch2_triggered = false;
+            }
         }
-        
-        last_switch1_state = current_switch1_state;
-        last_switch2_state = current_switch2_state;
 
         // Log position periodically
-        if (abs(stepper.currentPos - last_logged_pos) >= 256) {
+        if (abs(handle->stepper->currentPos - last_logged_pos) >= 256) {
             ESP_LOGD(TAG, "Position: %d, Frequency: %.1f Hz", 
-                     stepper.currentPos, stepper.current_freq);
-            last_logged_pos = stepper.currentPos;
+                     handle->stepper->currentPos, handle->stepper->current_freq);
+            last_logged_pos = handle->stepper->currentPos;
+            
+            if (handle->callbacks && handle->callbacks->position_callback) {
+                handle->callbacks->position_callback(handle->stepper->currentPos);
+            }
         }
 
         // Step the motor if enough time has passed
-        if ((current_time - stepper.lastStepTime) >= micros_per_step) {
+        if ((current_time - handle->stepper->lastStepTime) >= micros_per_step) {
             // Move one step
             if (distance_to_go > 0) {
-                stepper.currentPos++;
-                stepper.currentStep = (stepper.currentStep + 1) % 8;
+                handle->stepper->currentPos++;
+                handle->stepper->currentStep = (handle->stepper->currentStep + 1) % 8;
             } else {
-                stepper.currentPos--;
-                stepper.currentStep = (stepper.currentStep + 7) % 8;
+                handle->stepper->currentPos--;
+                handle->stepper->currentStep = (handle->stepper->currentStep + 7) % 8;
             }
 
-            set_output_pins(stepper.currentStep);
-            stepper.lastStepTime = current_time;
+            set_output_pins(handle->stepper->currentStep);
+            handle->stepper->lastStepTime = current_time;
             
             // Yield periodically
             steps_since_yield++;
@@ -234,18 +271,51 @@ static void stepper_task(void *pvParameters) {
  * Initializes the GPIO and creates the stepper motor control task
  */
 void app_main(void) {
+    motor_config_t config = {
+        .steps_per_rev = 4096,
+        .gpio_limit1 = LIMIT_SWITCH_PIN_1,
+        .gpio_limit2 = LIMIT_SWITCH_PIN_2
+    };
+
     init_gpio();
     
-    // Create stepper motor task
+    // Initialize the static callbacks structure
+    callbacks.limit_switch_callback = NULL;
+    callbacks.position_callback = NULL;
+
+    // Initialize the static handle structure
+    handle.motor_id = 0;
+    handle.stepper = &stepper;
+    handle.steps_per_rev = config.steps_per_rev;
+    handle.gpio_limit1 = config.gpio_limit1;
+    handle.gpio_limit2 = config.gpio_limit2;
+    handle.callbacks = &callbacks;
+
     xTaskCreatePinnedToCore(
         stepper_task,
         "stepper_task",
         4096,
-        NULL,
+        &handle,  // Now passing address of static handle
         configMAX_PRIORITIES - 1,
         NULL,
         1
     );
     
     ESP_LOGI(TAG, "Stepper motor control started");
+}
+
+static void handle_limit_switch_trigger(motor_handle_t *handle, int *rotation_direction, int64_t current_time) {
+    (void)current_time;  // Add this to indicate parameter is intentionally unused
+    
+    ESP_LOGI(TAG, "Limit switch triggered - reversing direction");
+    handle->stepper->currentPos = 0;
+    *rotation_direction = -(*rotation_direction);
+    handle->stepper->targetPos = *rotation_direction * INT32_MAX;
+    handle->stepper->direction_changed = true;  // Signal for frequency reset
+    
+    vTaskDelay(pdMS_TO_TICKS(50));
+    
+    if (handle->callbacks && handle->callbacks->limit_switch_callback) {
+        handle->callbacks->limit_switch_callback(handle->motor_id);
+    }
 }
