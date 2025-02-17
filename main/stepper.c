@@ -1,6 +1,16 @@
 /*
  * Dual Stepper Motor Control System
  * 
+ * Hardware:
+ * - ESP32-S3 Microcontroller (dual-core, 240MHz)
+ * - 2x 28BYJ-48 Stepper Motors (5V, 4-phase unipolar stepper)
+ * - 2x ULN2003 Driver Boards (darlington array driver)
+ * 
+ * Power Requirements:
+ * - 5V 0.5A supply for stepper motors and drivers
+ * - 3.3V 0.1A supply for ESP32-S3
+ * - Common ground connection required between supplies
+ * 
  * This module implements control for two stepper motors, each with its own limit switch.
  * Each motor runs in its own FreeRTOS task on separate cores for optimal performance:
  * - Motor 1: Core 0, lower priority
