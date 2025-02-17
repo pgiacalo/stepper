@@ -1,3 +1,12 @@
+/*
+ * Stepper Motor Control System
+ * 
+ * This module implements a stepper motor controller for a bidirectional system with limit switches.
+ * The motor accelerates smoothly from a start frequency to a maximum frequency and automatically
+ * reverses direction when limit switches are triggered. The system uses an 8-step sequence for
+ * smooth motor operation and implements acceleration ramping for smooth speed transitions.
+ */
+
 #include <stdio.h>
 #include <math.h>
 #include "freertos/FreeRTOS.h"
@@ -6,6 +15,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 
+// GPIO pin definitions for motor control and limit switches
 #define IN1 4
 #define IN2 5
 #define IN3 6
@@ -13,34 +23,44 @@
 #define LIMIT_SWITCH_PIN_1 15
 #define LIMIT_SWITCH_PIN_2 16 
 
+// Motor control parameters
 #define STEPS_PER_REVOLUTION 4096
 #define START_FREQ 100   // Hz - Base frequency for starting/direction changes
-#define MAX_FREQ 600    // Hz - Maximum frequency under load (increased from 600)
-#define ACCEL_RATE 600 // Hz/s - How fast to increase frequency (much faster acceleration)
+#define MAX_FREQ 600    // Hz - Maximum frequency under load
+#define ACCEL_RATE 600 // Hz/s - How fast to increase frequency
 
 static const char *TAG = "stepper";
 
+/* 
+ * 8-step sequence for stepper motor control
+ * Each row represents one step in the sequence, controlling four coils (IN1-IN4)
+ * This sequence provides smoother operation compared to simpler 4-step sequences
+ */
 static const uint8_t step_sequence[8][4] = {
-    {1, 0, 0, 0},
-    {1, 1, 0, 0},
-    {0, 1, 0, 0},
-    {0, 1, 1, 0},
-    {0, 0, 1, 0},
-    {0, 0, 1, 1},
-    {0, 0, 0, 1},
-    {1, 0, 0, 1}
+    {1, 0, 0, 0},  // Step 1
+    {1, 1, 0, 0},  // Step 2
+    {0, 1, 0, 0},  // Step 3
+    {0, 1, 1, 0},  // Step 4
+    {0, 0, 1, 0},  // Step 5
+    {0, 0, 1, 1},  // Step 6
+    {0, 0, 0, 1},  // Step 7
+    {1, 0, 0, 1}   // Step 8
 };
 
+/*
+ * Structure to maintain the stepper motor's state
+ * Tracks position, movement parameters, and acceleration state
+ */
 typedef struct {
-    int32_t currentPos;
-    int32_t targetPos;
-    uint8_t currentStep;
-    int64_t lastStepTime;
-    float current_freq;   // Current operating frequency
-    float target_freq;    // Target frequency to reach
-    int64_t last_freq_update; // Time of last frequency update
-    bool ramping_up;      // Whether we're currently accelerating
-    bool direction_changed; // Flag for direction changes
+    int32_t currentPos;      // Current position in steps
+    int32_t targetPos;       // Target position to move to
+    uint8_t currentStep;     // Current step in the sequence (0-7)
+    int64_t lastStepTime;    // Timestamp of last step
+    float current_freq;      // Current operating frequency
+    float target_freq;       // Target frequency to reach
+    int64_t last_freq_update;// Time of last frequency update
+    bool ramping_up;         // Whether we're currently accelerating
+    bool direction_changed;   // Flag for direction changes
 } stepper_state_t;
 
 static stepper_state_t stepper = {
@@ -55,6 +75,12 @@ static stepper_state_t stepper = {
     .direction_changed = false
 };
 
+/*
+ * Updates the motor's operating frequency based on acceleration parameters
+ * Handles both acceleration ramping and direction changes
+ * 
+ * @param current_time: Current system time in microseconds
+ */
 static void update_frequency(int64_t current_time) {
     if (!stepper.ramping_up && !stepper.direction_changed) {
         return;
@@ -80,6 +106,11 @@ static void update_frequency(int64_t current_time) {
     stepper.last_freq_update = current_time;
 }
 
+/*
+ * Sets the output pins according to the current step in the sequence
+ * 
+ * @param step_index: Index into the step_sequence array (0-7)
+ */
 static void set_output_pins(uint8_t step_index) {
     gpio_set_level(IN1, step_sequence[step_index][0]);
     gpio_set_level(IN2, step_sequence[step_index][1]);
@@ -87,6 +118,10 @@ static void set_output_pins(uint8_t step_index) {
     gpio_set_level(IN4, step_sequence[step_index][3]);
 }
 
+/*
+ * Initializes GPIO pins for motor control and limit switches
+ * Configures motor pins as outputs and limit switch pins as inputs with pull-up
+ */
 static void init_gpio(void) {
     gpio_config_t motor_conf = {
         .intr_type = GPIO_INTR_DISABLE,
@@ -107,6 +142,13 @@ static void init_gpio(void) {
     gpio_config(&switch_conf);
 }
 
+/*
+ * Main stepper motor control task
+ * Handles motor movement, limit switch monitoring, and speed control
+ * Implements smooth acceleration and direction changes
+ * 
+ * @param pvParameters: Task parameters (unused)
+ */
 static void stepper_task(void *pvParameters) {
     int64_t current_time;
     int32_t distance_to_go;
@@ -187,6 +229,10 @@ static void stepper_task(void *pvParameters) {
     }
 }
 
+/*
+ * Application entry point
+ * Initializes the GPIO and creates the stepper motor control task
+ */
 void app_main(void) {
     init_gpio();
     
