@@ -1,10 +1,15 @@
 /*
- * Stepper Motor Control System
+ * Dual Stepper Motor Control System
  * 
- * This module implements a stepper motor controller for a bidirectional system with limit switches.
- * The motor accelerates smoothly from a start frequency to a maximum frequency and automatically
- * reverses direction when limit switches are triggered. The system uses an 8-step sequence for
- * smooth motor operation and implements acceleration ramping for smooth speed transitions.
+ * This module implements control for two stepper motors, each with its own limit switch.
+ * Each motor runs in its own FreeRTOS task on separate cores for optimal performance:
+ * - Motor 1: Core 0, lower priority
+ * - Motor 2: Core 1, higher priority
+ * 
+ * Each motor accelerates smoothly from a start frequency to a maximum frequency and 
+ * automatically reverses direction when its limit switch is triggered. The system uses 
+ * an 8-step sequence for smooth motor operation and implements acceleration ramping 
+ * for smooth speed transitions.
  */
 
 #include <stdio.h>
@@ -15,17 +20,17 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 
-// GPIO pin definitions for motor control and limit switches
-#define IN1_MOTOR1 4
+// GPIO pin definitions for both motors and their limit switches
+#define IN1_MOTOR1 4    // Motor 1 control pins
 #define IN2_MOTOR1 5
 #define IN3_MOTOR1 6
 #define IN4_MOTOR1 7
-#define IN1_MOTOR2 8   // New pins for second motor
+#define IN1_MOTOR2 8    // Motor 2 control pins
 #define IN2_MOTOR2 9
 #define IN3_MOTOR2 10
 #define IN4_MOTOR2 11
-#define LIMIT_SWITCH_MOTOR1 15
-#define LIMIT_SWITCH_MOTOR2 16
+#define LIMIT_SWITCH_MOTOR1 15  // Limit switch for motor 1
+#define LIMIT_SWITCH_MOTOR2 16  // Limit switch for motor 2
 
 // Motor control parameters
 #define STEPS_PER_REVOLUTION 4096
@@ -37,8 +42,9 @@ static const char *TAG = "stepper";
 
 /* 
  * 8-step sequence for stepper motor control
- * Each row represents one step in the sequence, controlling four coils (IN1-IN4)
- * This sequence provides smoother operation compared to simpler 4-step sequences
+ * Each row represents one step in the sequence, controlling four coils
+ * This sequence is used for both motors and provides smoother operation 
+ * compared to simpler 4-step sequences
  */
 static const uint8_t step_sequence[8][4] = {
     {1, 0, 0, 0},  // Step 1
@@ -156,24 +162,33 @@ static void update_frequency(int64_t current_time, stepper_state_t *stepper) {
  * Sets the output pins according to the current step in the sequence
  * 
  * @param step_index: Index into the step_sequence array (0-7)
+ * @param motor_id: Motor identifier (1 for motor 1, 2 for motor 2)
  */
-static void set_output_pins(uint8_t step_index, bool is_motor1) {
-    if (is_motor1) {
-        gpio_set_level(IN1_MOTOR1, step_sequence[step_index][0]);
-        gpio_set_level(IN2_MOTOR1, step_sequence[step_index][1]);
-        gpio_set_level(IN3_MOTOR1, step_sequence[step_index][2]);
-        gpio_set_level(IN4_MOTOR1, step_sequence[step_index][3]);
-    } else {
-        gpio_set_level(IN1_MOTOR2, step_sequence[step_index][0]);
-        gpio_set_level(IN2_MOTOR2, step_sequence[step_index][1]);
-        gpio_set_level(IN3_MOTOR2, step_sequence[step_index][2]);
-        gpio_set_level(IN4_MOTOR2, step_sequence[step_index][3]);
+static void set_output_pins(uint8_t step_index, int motor_id) {
+    switch (motor_id) {
+        case 1:
+            gpio_set_level(IN1_MOTOR1, step_sequence[step_index][0]);
+            gpio_set_level(IN2_MOTOR1, step_sequence[step_index][1]);
+            gpio_set_level(IN3_MOTOR1, step_sequence[step_index][2]);
+            gpio_set_level(IN4_MOTOR1, step_sequence[step_index][3]);
+            break;
+        case 2:
+            gpio_set_level(IN1_MOTOR2, step_sequence[step_index][0]);
+            gpio_set_level(IN2_MOTOR2, step_sequence[step_index][1]);
+            gpio_set_level(IN3_MOTOR2, step_sequence[step_index][2]);
+            gpio_set_level(IN4_MOTOR2, step_sequence[step_index][3]);
+            break;
+        default:
+            ESP_LOGE(TAG, "Invalid motor ID: %d", motor_id);
+            break;
     }
 }
 
 /*
- * Initializes GPIO pins for motor control and limit switches
+ * Initializes GPIO pins for both motors and their limit switches
  * Configures motor pins as outputs and limit switch pins as inputs with pull-up
+ * Motor 1: IN1_MOTOR1 through IN4_MOTOR1
+ * Motor 2: IN1_MOTOR2 through IN4_MOTOR2
  */
 static void init_gpio(void) {
     gpio_config_t motor1_conf = {
@@ -207,11 +222,15 @@ static void init_gpio(void) {
 }
 
 /*
- * Main stepper motor control task
+ * Main stepper motor control task - one instance per motor
  * Handles motor movement, limit switch monitoring, and speed control
  * Implements smooth acceleration and direction changes
  * 
- * @param pvParameters: Task parameters (unused)
+ * Each motor runs in its own task on separate cores:
+ * Motor 1 runs on Core 0 with lower priority
+ * Motor 2 runs on Core 1 with higher priority
+ * 
+ * @param pvParameters: Pointer to motor_handle_t structure for this motor
  */
 static void stepper_task(void *pvParameters) {
     (void)pvParameters;  // Add this since we use handle directly from global
@@ -289,7 +308,7 @@ static void stepper_task(void *pvParameters) {
                 handle->stepper->currentStep = (handle->stepper->currentStep + 7) % 8;
             }
 
-            set_output_pins(handle->stepper->currentStep, handle->motor_id == 1);
+            set_output_pins(handle->stepper->currentStep, handle->motor_id);
             handle->stepper->lastStepTime = current_time;
             
             // Yield periodically
@@ -304,7 +323,8 @@ static void stepper_task(void *pvParameters) {
 
 /*
  * Application entry point
- * Initializes the GPIO and creates the stepper motor control task
+ * Initializes GPIO for both motors and creates two stepper motor control tasks
+ * Each task runs on a separate core to prevent CPU contention
  */
 void app_main(void) {
     motor_config_t config1 = {
